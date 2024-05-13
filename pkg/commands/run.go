@@ -234,7 +234,7 @@ func (cr *CachingRunCommand) ExecuteCommand(config *v1.Config, buildArgs *docker
 		util.IncludeWhiteout(),
 	)
 	if err != nil {
-		return errors.Wrap(err, "extracting fs from image")
+		return errors.Wrap(err, "extracting fs from image: cached run command")
 	}
 
 	return nil

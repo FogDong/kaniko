@@ -147,6 +147,21 @@ func GetFSFromImage(root string, img v1.Image, extract ExtractFunction) ([]strin
 	return GetFSFromLayers(root, layers, ExtractFunc(extract))
 }
 
+func retry(attempts int, sleep time.Duration, fn func() error) error {
+	for i := 0; i < attempts; i++ {
+		if err := fn(); err != nil {
+			logrus.Warnf("Error: %s. Retrying...", err)
+			if i >= attempts-1 {
+				return err
+			}
+			time.Sleep(sleep)
+			continue
+		}
+		return nil
+	}
+	return fmt.Errorf("after %d attempts, last error: %s", attempts, fn())
+}
+
 func GetFSFromLayers(root string, layers []v1.Layer, opts ...FSOpt) ([]string, error) {
 	volumes = []string{}
 	cfg := new(FSConfig)
@@ -170,60 +185,65 @@ func GetFSFromLayers(root string, layers []v1.Layer, opts ...FSOpt) ([]string, e
 		} else {
 			logrus.Tracef("Extracting layer %d", i)
 		}
-
-		r, err := l.Uncompressed()
-		if err != nil {
-			return nil, err
-		}
-		defer r.Close()
-
-		tr := tar.NewReader(r)
-		for {
-			hdr, err := tr.Next()
-			if errors.Is(err, io.EOF) {
-				break
-			}
-
+		err := retry(3, 2*time.Second, func() error {
+			r, err := l.Uncompressed()
 			if err != nil {
-				return nil, errors.Wrap(err, fmt.Sprintf("error reading tar %d", i))
+				return errors.Wrap(err, fmt.Sprintf("error getting uncompressed layer %d", i))
 			}
+			defer r.Close()
 
-			cleanedName := filepath.Clean(hdr.Name)
-			path := filepath.Join(root, cleanedName)
-			base := filepath.Base(path)
-			dir := filepath.Dir(path)
-
-			if strings.HasPrefix(base, archive.WhiteoutPrefix) {
-				logrus.Tracef("Whiting out %s", path)
-
-				name := strings.TrimPrefix(base, archive.WhiteoutPrefix)
-				path := filepath.Join(dir, name)
-
-				if CheckCleanedPathAgainstIgnoreList(path) {
-					logrus.Tracef("Not deleting %s, as it's ignored", path)
-					continue
-				}
-				if childDirInIgnoreList(path) {
-					logrus.Tracef("Not deleting %s, as it contains a ignored path", path)
-					continue
+			tr := tar.NewReader(r)
+			for {
+				hdr, err := tr.Next()
+				if errors.Is(err, io.EOF) {
+					break
 				}
 
-				if err := os.RemoveAll(path); err != nil {
-					return nil, errors.Wrapf(err, "removing whiteout %s", hdr.Name)
+				if err != nil {
+					return errors.Wrap(err, fmt.Sprintf("error reading tar %d", i))
 				}
 
-				if !cfg.includeWhiteout {
-					logrus.Trace("Not including whiteout files")
-					continue
+				cleanedName := filepath.Clean(hdr.Name)
+				path := filepath.Join(root, cleanedName)
+				base := filepath.Base(path)
+				dir := filepath.Dir(path)
+
+				if strings.HasPrefix(base, archive.WhiteoutPrefix) {
+					logrus.Tracef("Whiting out %s", path)
+
+					name := strings.TrimPrefix(base, archive.WhiteoutPrefix)
+					path := filepath.Join(dir, name)
+
+					if CheckCleanedPathAgainstIgnoreList(path) {
+						logrus.Tracef("Not deleting %s, as it's ignored", path)
+						continue
+					}
+					if childDirInIgnoreList(path) {
+						logrus.Tracef("Not deleting %s, as it contains a ignored path", path)
+						continue
+					}
+
+					if err := os.RemoveAll(path); err != nil {
+						return errors.Wrapf(err, "removing whiteout %s", hdr.Name)
+					}
+
+					if !cfg.includeWhiteout {
+						logrus.Trace("Not including whiteout files")
+						continue
+					}
+
 				}
 
+				if err := cfg.extractFunc(root, hdr, cleanedName, tr); err != nil {
+					return errors.Wrap(err, "failed to extract file")
+				}
+
+				extractedFiles = append(extractedFiles, filepath.Join(root, cleanedName))
 			}
-
-			if err := cfg.extractFunc(root, hdr, cleanedName, tr); err != nil {
-				return nil, err
-			}
-
-			extractedFiles = append(extractedFiles, filepath.Join(root, cleanedName))
+			return nil
+		})
+		if err != nil {
+			return nil, fmt.Errorf("failed to process layer %d: %w", i, err)
 		}
 	}
 	return extractedFiles, nil

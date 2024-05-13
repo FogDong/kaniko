@@ -200,7 +200,7 @@ func (cr *CachingCopyCommand) ExecuteCommand(config *v1.Config, buildArgs *docke
 
 	logrus.Debugf("ExtractedFiles: %s", cr.extractedFiles)
 	if err != nil {
-		return errors.Wrap(err, "extracting fs from image")
+		return errors.Wrap(err, "extracting fs from image: cached copy command")
 	}
 
 	return nil
